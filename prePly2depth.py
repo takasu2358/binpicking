@@ -50,8 +50,8 @@ def pointcloud_process(pcd_matrix, flat):
 
 def PtoD(depth):
     MAX_DEPTH = depth.max()
-    if MAX_DEPTH > 100:
-        MAX_DEPTH = 100
+    # if MAX_DEPTH > 100:
+    #     MAX_DEPTH = 100
     MIN_DEPTH = 0
     MAX_DEPTH = 100
 
@@ -103,8 +103,8 @@ def main(pc):
     # pil_depth = Image.fromarray(depth)
     # pil_depth = pil_depth.rotate(2)
     # depth = np.array(pil_depth)
-    # depth[0:50] = 0
-    # depth[:, 0:50] = 0
+    depth[0:50] = 0
+    depth[:, 0:50] = 0
 
     elapsed_time = time.time() - start#処理の終了時間を取得
     print("Converting ply to depth image is succeeded!")

@@ -44,11 +44,13 @@ foldername = "Experiment-" + tstr
 save_folder_path = data_folder_path / "result" / "Experiment" / foldername
 os.mkdir(save_folder_path)
 
-ply_filepath = data_folder_path / "ply" / "2022-11-23" / "1.ply"
+ply_filepath = data_folder_path / "ply" / "2022-11-23" / "2.ply"
+ply_filepath = data_folder_path / "ply" / "SI" / "U-SI" / "1.ply"
 
 #コンフィグファイルの読み込み
 # config_path = data_folder_path / "cfg" /"config_file_wireharness.yaml"
 config_path = data_folder_path / "cfg" /"config_file_flexible.yaml"
+config_path = data_folder_path / "cfg" /"config_file_Ushape.yaml"
 bincfg = BinConfig(config_path)
 cfg = bincfg.config
 
@@ -629,7 +631,6 @@ class Skeletonize():
                     skel.extend(ske)
                 flag = 1
             else:
-                # V.visualize_1img(region_skel)
                 ad_branch_point, branch_point, branch_end_point = D.detect_singularity(region_skel)
                 # V.visualize_branch_point(region_skel, branch_point, ad_branch_point, branch_end_point)
                 skel, flag = self.cut_branch(region_skel, ad_branch_point, branch_point, branch_end_point)
@@ -1330,10 +1331,12 @@ def sunder_curve(skel_list, skel2region_index):
         
         del skel_list[skel_index]
         del skel2region_index[skel_index]
+        line_num = 0
         for line in sunder_lines:
             if len(line) > 20:
                 skel_list.append(line)
-        for _ in range(len(sunder_lines)):
+                line_num += 1
+        for _ in range(line_num):
             skel2region_index.append(region_index)
 
     return skel_list, skel2region_index
@@ -1987,8 +1990,8 @@ class ConnectLine():
     def which_region_left(self, skip_region_list, skel2region_index, first_skip_skel2region_index, last_region_index, first_skip_skel, correct_skel_index):
         flat = []
         
-        if not first_skip_skel2region_index == []:
-            raise ValueError("check first_skip_skel2region_index")
+        # if not first_skip_skel2region_index == []:
+        #     raise ValueError("check first_skip_skel2region_index")
 
         for i in range(len(first_skip_skel)):
             region_index = first_skip_skel2region_index[i]

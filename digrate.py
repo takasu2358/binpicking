@@ -1,7 +1,9 @@
 from distutils.command import check
+from distutils.log import error
 from heapq import merge
 from multiprocessing.sharedctypes import Value
 from pickletools import uint8
+from pydoc import visiblename
 from re import template
 from wsgiref.util import request_uri
 import numpy as np
@@ -11,6 +13,7 @@ import pandas as pd
 import random
 from pyrsistent import v
 from scipy.fftpack import dst
+from scipy.misc import central_diff_weights
 from skimage.morphology import skeletonize
 import time
 import math
@@ -42,19 +45,15 @@ foldername = "Experiment-" + tstr
 save_folder_path = data_folder_path / "result" / "Experiment" / foldername
 os.mkdir(save_folder_path)
 
-# ply_filepath = data_folder_path / "ply" / "2022-7-21" / "U-5.ply"
-# ply_filepath = data_folder_path / "ply" / "2022-8-23" / "wire-3.ply"
-# ply_filepath = data_folder_path / "ply" / "error" / "sort_skel_list.ply"
-# ply_filepath = data_folder_path / "ply" / "2022-9-1" / "U-shape" / "U-3.ply"
-# ply_filepath = data_folder_path / "ply" / "2022-9-1" / "ko-shape" / "ko-10.ply"
-# ply_filepath = data_folder_path / "ply" / "SI" / "U-SI" / "3.ply"
-ply_filepath = data_folder_path / "ply" / "out.ply"
+ply_filepath = data_folder_path / "ply" / "SI" / "U-SI" / "2.ply"
+# ply_filepath = data_folder_path / "ply" / "out.ply"
+# ply_filepath = data_folder_path / "ply" / "ko.ply"
 
 #コンフィグファイルの読み込み
-# config_path = data_folder_path / "cfg" /"config_file_Ushape.yaml"
+config_path = data_folder_path / "cfg" /"config_file_Ushape.yaml"
 # config_path = data_folder_path / "cfg" /"config_file_koshape.yaml"
-# config_path = data_folder_path / "cfg" /"config_file_wireharness.yaml"
-config_path = data_folder_path / "cfg" /"config_file_Sshape.yaml"
+# config_path = data_folder_path / "cfg" /"config_file_Sshape.yaml"
+# config_path = data_folder_path / "cfg" /"config_file_longSshape.yaml"
 bincfg = BinConfig(config_path)
 cfg = bincfg.config
 
@@ -227,10 +226,25 @@ class SaveImage():
 
         return color_img
 
+    def save_points(self, region_list, img_name):
+        color_img = np.zeros((height, width, 3))
+        for region in region_list:
+            blue = random.random()*255 #青色を0〜1の中でランダムに設定
+            green = random.random()*255 #緑色を0〜1の中でランダムに設定
+            red = random.random()*255 #赤色を0〜1の中でランダムに設定
+            for xy in region:
+                color_img = cv2.circle(color_img, [xy[1], xy[0]], 1, (blue, green, red), -1)
+                # color_img[xy[0]][xy[1]] = [blue, green, red] #各領域ごとに異なる色を指定
+
+        if not img_name == []:
+            cv2.imwrite(str(save_folder_path / img_name) + ".png", color_img)
+
+        return color_img
+
     def save_centerpoints(self, center_points_list):
         depth_centerpoint = img_copy.copy()
         depth_centerpoint = gray2color(depth_centerpoint)
-        points = self.save_region(center_points_list, [])
+        points = self.save_points(center_points_list, [])
         depth_centerpoint = depth_centerpoint + points
         cv2.imwrite(str(save_folder_path / "depth_centerpoint.png"), depth_centerpoint)
 
@@ -402,7 +416,7 @@ class RegionGrowing():
             value, seed = self.serch_nonzero(seed[0], seed[1])
             area = len(region)
             # if area > self.lat:
-            #     region_list.append(region)
+            #   region_list.append(region)
             if area > self.lat and area <= self.full_area + 200:
                 region_list.append(region)
                 labeled_img += MI.make_image(region, count)
@@ -413,6 +427,11 @@ class RegionGrowing():
                 for region in regions:
                     labeled_img += MI.make_image(region, count)
                     count += 1
+
+            # if area > self.lat:
+            #     region_list.append(region)
+            #     labeled_img += MI.make_image(region, count)
+            #     count += 1
         
         
         return region_list, labeled_img
@@ -497,7 +516,7 @@ class RegionGrowing():
         ##########################################################
 
         ########端点を削っていく(今の状態だと細かい枝が多い)######
-        print("451:枝を削る順番に注意、枝先の枝からやるべき")
+        # print("451:枝を削る順番に注意、枝先の枝からやるべき")
         for xy in end:
             line = []
             while 1:
@@ -608,24 +627,38 @@ class Skeletonize():
     def __init__(self):
         self.ct = cfg["cut_threshold"]
         self.full_length = cfg["full_length"] 
-        self.line_length_threshold = self.full_length*0.06
+        # self.line_length_threshold = self.full_length*0.06
+        self.line_length_threshold = 20
 
     def skeletonize_region_list(self, region_list):
         MI, V, D = MakeImage(), Visualize(), Detect()
 
         kernel_size = 3
+        scount = 0
         skel_list2, branch_point_list2, ad_branch_point_list2, end_point_list2 = [], [], [], []
-        skip_index, skel2region_index, last_skel_index = [], [], []
+        skip_index, skel2region_index, last_region_index = [], [], []
         for i, region in enumerate(region_list):
-            # if not i == 25:
+            # if not i == 3:
             #     continue
             reg_img = MI.make_image(region, 1)
             reg_img = cv2.morphologyEx(reg_img, cv2.MORPH_CLOSE, np.ones((kernel_size, kernel_size), np.uint8))
             region_skel = skeletonize(reg_img, method="lee")
-            region_skel = self.line_circle_delete(region_skel)
-            ad_branch_point, branch_point, branch_end_point = D.detect_singularity(region_skel)
-            # V.visualize_branch_point(region_skel, branch_point, ad_branch_point, branch_end_point)
-            skel, flag = self.cut_branch(region_skel, ad_branch_point, branch_point, branch_end_point)
+            region_skel, line_list, skip_flag = self.line_circle_delete(region_skel)
+            if not line_list == []:
+                skel = []
+                for line in line_list:
+                    limg = MI.make_image(line, 1)
+                    ad_branch_point, branch_point, branch_end_point = D.detect_singularity(limg)
+                    # V.visualize_branch_point(limg, branch_point, ad_branch_point, branch_end_point)
+                    ske, flag = self.cut_branch(limg, ad_branch_point, branch_point, branch_end_point)
+                    skel.extend(ske)
+                flag = 1
+            else:
+                ad_branch_point, branch_point, branch_end_point = D.detect_singularity(region_skel)
+                # V.visualize_branch_point(region_skel, branch_point, ad_branch_point, branch_end_point)
+                skel, flag = self.cut_branch(region_skel, ad_branch_point, branch_point, branch_end_point)
+                if skip_flag == 1:
+                    flag = 1
             if flag == 0:
                 skel = skel[0]
                 if len(skel) <= self.line_length_threshold:
@@ -638,9 +671,10 @@ class Skeletonize():
                 ad_branch_point_list2.append(ad_branch_point)
                 end_point_list2.append(end_point)
                 skel2region_index.append(i)
+                scount += 1
             else:
                 skip_index.append(i)
-                last_skel_index.append(i)
+                last_region_index.append(i)
                 for ske in skel:
                     if len(ske) <= self.line_length_threshold:
                         continue
@@ -651,29 +685,96 @@ class Skeletonize():
                     ad_branch_point_list2.append(ad_branch_point)
                     end_point_list2.append(end_point)
                     skel2region_index.append(i)
+                    scount += 1
 
-        return skel_list2, branch_point_list2, ad_branch_point_list2, end_point_list2, skip_index, skel2region_index, last_skel_index
+        # V.visualize_region(skel_list2)
+        # raise ValueError       
+
+        return skel_list2, branch_point_list2, ad_branch_point_list2, end_point_list2, skip_index, skel2region_index, last_region_index
     
     def line_circle_delete(self, line_img):
-        contours, _ = cv2.findContours(line_img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE) #輪郭を検出(輪郭の内部に輪郭があれば、その細線には周回する部分がある)
+        D = Detect()
+        contours, hierarchy = cv2.findContours(line_img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE) #輪郭を検出(輪郭の内部に輪郭があれば、その細線には周回する部分がある)
 
         #周回部分がなければそのまま返す
         if len(contours) == 1:
-            return line_img
+            return line_img, [], 0
+        child = 0
+        for i in range(1, len(contours)):
+            if not hierarchy[0][i][3] == -1: child += 1
+        if child == 0:
+            return line_img, [], 0
 
         #周回部分削除(contours[0]は最外部の輪郭)
+        large_area = []
+        check = 0
         for i in range(1, len(contours)):
-            line_img = cv2.drawContours(line_img, contours, i, 1, -1) #周回部分の内側を塗りつぶす
+            if not hierarchy[0][i][3] == -1:
+                if len(contours[i]) > 100:
+                    check += 1
+                    continue
+                line_img = cv2.drawContours(line_img, contours, i, 1, -1) #周回部分の内側を塗りつぶす
         line_img = skeletonize(line_img, method="lee") #再度細線化
 
-        return line_img
+        # V = Visualize()
+        # V.visualize_1img(line_img)
+
+        if check > 0:
+            ad_branch_point, branch_point, _ = D.detect_singularity(line_img)
+            bps = [ad_points[0] for ad_points in ad_branch_point]
+            bps.extend(branch_point)
+
+            line_img_copy = line_img.copy()
+            for bp in bps:
+                line_img_copy = cv2.circle(line_img_copy, (bp[1], bp[0]), 5, 0, -1)
+
+                # V = Visualize()
+                # V.visualize_1img(line_img_copy)
+
+                contours, hierarchy = cv2.findContours(line_img_copy, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+
+                # test_img = np.zeros((height, width))
+                # for i in range(1, len(contours)):
+                #     print(hierarchy[0][i])
+                #     if not hierarchy[0][i][3] == -1:
+                #         print(i)
+                #         test_img = cv2.drawContours(test_img, contours, i, color=255, thickness=1)
+                # V.visualize_1img(test_img)
+
+                clen = [len(c) for c in contours]
+                contours = list(contours)
+                # del contours[np.argmax(clen)]
+                # del clen[np.argmax(clen)]
+                flag = 0
+                for i in range(1, len(contours)):
+                    if not hierarchy[0][i][3] == -1:
+                        if clen[i] > 100:
+                            # clist = [c[0] for c in contours[i]]
+                            flag += 1
+                            break
+                if flag == 0:
+                    break
+
+            for i in range(1, len(contours)):
+                line_img = cv2.drawContours(line_img, contours, i, 1, -1) #周回部分の内側を塗りつぶす
+            line_img = skeletonize(line_img, method="lee") #再度細線化
+
+            line_list = D.detect_line(line_img_copy)
+
+            # V.visualize_1img(line_img_copy)
+
+            if len(line_list) > 1:
+                return [], line_list, 1
+            else:
+                return line_img_copy, [], 1
+
+        return line_img, [], 0
 
     def cut_branch(self, skeleton, ad_branch_point, branch_point, branch_end_point):
         ad_bra = list(points[0] for points in ad_branch_point) #ad_branch_pointから代表として1点取得
         index, ad_index = 0, 0 #branch_pointとad_branch_point用の添字
-        last_line_list, interpolate_line_list = [], []
-        D = Detect()
-        MI = MakeImage()
+        delete_point = []
+        D, MI = Detect(), MakeImage()
 
         #branch_pointとad_braに値がある間ループ
         while len(branch_point) > 0 or len(ad_bra) > 0:
@@ -681,23 +782,17 @@ class Skeletonize():
             #branch_pointに値がある場合
             if len(branch_point) > 0:
                 xy = branch_point[index] #注目する1点連結の分岐点を取得
-                skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, _, interpolate_line_list = self.cutting(skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list) #cuttingで1点連結の分岐点の場合の枝切り
-                
+                skeleton, branch_point, ad_bra, ad_branch_point, _, delete_point = self.cutting(skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point) #cuttingで1点連結の分岐点の場合の枝切り
+
             #ad_braに値がある場合
             if len(ad_bra) > 0:
                 xy = ad_bra[ad_index] #注目する3点連結の分岐点を取得
-                skeleton, branch_point, ad_bra, branch_point, last_line_list, _, interpolate_line_list = self.ad_cutting(skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list) #ad_cuttingで3点連結の分岐点の場合の枝切り
-        
-        #補間線(枝残し処理で発生)があればskeleton画像に記入する
-        for line in interpolate_line_list:
-            for xy in line:
-                skeleton[xy[0]][xy[1]] = 1
+                skeleton, branch_point, ad_bra, ad_branch_point, _, delete_point = self.ad_cutting(skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point) #ad_cuttingで3点連結の分岐点の場合の枝切り
 
-        num = len(last_line_list)
-        #得られた細線に対して
-        for i in range(0, num):
-            skeleton += MI.make_image(last_line_list[i], 1)
-        ad_branch_point, branch_point, end_point = D.detect_singularity(skeleton)
+        for point in delete_point:
+            skeleton = cv2.circle(skeleton, [point[1], point[0]], 5, 0, -1)
+
+        ad_branch_point, branch_point, _ = D.detect_singularity(skeleton)
         #分岐点が存在する場合、分岐点を処理する
         if len(branch_point) > 0: 
             for count in range(0, len(branch_point)//2):
@@ -714,21 +809,21 @@ class Skeletonize():
         
         skel = D.detect_line(skeleton)
 
-        if num > 0:
+        if len(skel) > 1:
             return skel, 1
         else:
             return skel, 0
 
-    def cutting(self, skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list):        
+    def cutting(self, skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point):        
         delete_length = 0
 
         if not xy in branch_point:
-            return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, 0, interpolate_line_list
+            return skeleton, branch_point, ad_bra, ad_branch_point, 0, delete_point
         
         #branch_pointに入っている座標xyがすでにskeletonから消えている場合は、branch_pointから削除して返却
         if skeleton[xy[0]][xy[1]] == 0:
             branch_point.remove(xy) #branch_pointから座標xyを削除
-            return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, 0, interpolate_line_list
+            return skeleton, branch_point, ad_bra, ad_branch_point, 0, delete_point
 
         line_img_copy = np.uint8(skeleton.copy()) #skeletonをコピーして、line_img_copyとする
         line_img_copy[xy[0]][xy[1]] = 0 #分岐点を削除
@@ -737,35 +832,27 @@ class Skeletonize():
 
         #ラベルが3つより多ければその分岐点にはまだ枝が残っている
         while len(stats) > 3:
-            skeleton, stats, branch_point, ad_bra, ad_branch_point, last_line_list, interpolate_line_list, limg_list = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list)
-            line_labels[skeleton == 0] = 0 
+            skeleton, stats, branch_point, ad_bra, ad_branch_point, limg_list, delete_point = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point)
+            line_labels[skeleton == 0] = 0
             min_label1 = self.search_min_line(stats, branch_end_point, limg_list)
             if min_label1 >= 0:
                 if stats[min_label1][4] < self.ct:
-                    # limg = np.zeros((height, width))
-                    # limg[line_labels == min_label1] = 1
                     limg = limg_list[min_label1-1]
                     skeleton[limg > 0] = 0
                     delete_length = stats[min_label1][4]
-                    # line_labels[line_labels > min_label1] -= 1
                     nlabels -= 1
                     stats = np.delete(stats, min_label1, 0) #statsからmin_label1番目の行を削除
                 else:
-                    skeleton, not_connect_index, last_line, not_connect_len, interpolate_line = self.select_cut_branch(nlabels, limg_list, [xy], branch_end_point)
-                    interpolate_line_list.append(interpolate_line)
-                    delete_length = not_connect_len
-                    not_connect_index = np.sort(not_connect_index)[::-1]
-                    for index in not_connect_index:
-                        # line_labels[line_labels > index] -= 1
-                        stats = np.delete(stats, index, 0)
-                        nlabels -= 1
-                    last_line_list.extend(last_line)
+                    delete_point.append(xy)
+                    delete_length = 0
+                    stats = []
 
                 if xy in branch_point:
                     branch_point.remove(xy)
-            else:
-                return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list
 
+            else:
+                return skeleton, branch_point, ad_bra, ad_branch_point, delete_length, delete_point
+        
         #whileの条件であるstatsに3つより多くラベルが存在するを満たさない分岐点の処理(分岐点を削除しても線が2本しかできない場合)
         if xy in branch_point:
             nearby = 0 #1点分岐点の近くに1点分岐点があるかのフラグ
@@ -786,37 +873,27 @@ class Skeletonize():
                         line_img_copy[xy[0]+i][xy[1]+j] = 0 #隣接する1点分岐点を削除
 
                         #通常の枝切り手法と同じ
-                        _, line_labels, stats, _ = cv2.connectedComponentsWithStats(line_img_copy)
+                        nlabels, line_labels, stats, _ = cv2.connectedComponentsWithStats(line_img_copy)
                         while len(stats) > 3:
-                            skeleton, stats, branch_point, ad_bra, ad_branch_point, last_line_list, interpolate_line_list, limg_list = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list)
+                            skeleton, stats, branch_point, ad_bra, ad_branch_point, limg_list, delete_point = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point)
 
                             line_labels[skeleton == 0] = 0 
                             min_label1 = self.search_min_line(stats, branch_end_point, limg_list)
                             if min_label1 >= 0:
                                 if stats[min_label1][4] < self.ct:
-                                    # limg = np.zeros((height, width))
-                                    # limg[line_labels == min_label1] = 1
                                     limg = limg_list[min_label1-1]
                                     skeleton[limg > 0] = 0
                                     delete_length = stats[min_label1][4]
-                                    # line_labels[line_labels > min_label1] -= 1
                                     nlabels -= 1
                                     stats = np.delete(stats, min_label1, 0) #statsからmin_label1番目の行を削除
                                 else:
-                                    skeleton, not_connect_index, last_line, not_connect_len, interpolate_line = self.select_cut_branch(nlabels, limg_list, [xy], branch_end_point)
-                                    interpolate_line_list.append(interpolate_line)
-                                    delete_length = not_connect_len
-                                    not_connect_index = np.sort(not_connect_index)[::-1]
-                                    for index in not_connect_index:
-                                        # line_labels[line_labels > index] -= 1
-                                        stats = np.delete(stats, index, 0)
-                                        nlabels -= 1
-                                    last_line_list.extend(last_line)
+                                    delete_point.append(xy)
+                                    delete_length = 0
 
                                 if xy in branch_point:
                                     branch_point.remove(xy)
                             else:
-                                return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list
+                                return skeleton, branch_point, ad_bra, ad_branch_point, delete_length, delete_point
                            
                         #2点の1点分岐点のどちらを削除するか
                         point1 = np.sum(skeleton[xy[0]-1:xy[0]+2, xy[1]-1:xy[1]+2]) #注目している1点分岐点の近傍点数を計算
@@ -827,32 +904,41 @@ class Skeletonize():
                         #隣接している1点分岐点の近傍点が3点なら消す
                         elif point2 == 3 and point1 > 3:
                             skeleton[xy[0]+i][xy[1]+j] = 0
-                        branch_point.remove((xy[0]+i, xy[1]+j)) #隣接している1点分岐点をbranch_pointから削除
-                        nearby += 1
 
             #1点分岐点が隣接していない場合
             if nearby == 0:
-                raise ValueError
+                # raise ValueError
                 around_branch = skeleton[xy[0]-1:xy[0]+2, xy[1]-1:xy[1]+2]
                 if np.sum(around_branch) > 3:
                     #通常の枝切り手法と同じ
-                    min_label = np.where(stats[:, 4] == min(stats[:, 4]))[0][0]
-                    limg = np.zeros((height, width))
-                    limg[line_labels == min_label] = 1
-                    skeleton[limg > 0] = 0
-                    
-                    if min(stats[:, 4]) > self.ct:
-                        raise ValueError("この場合にも枝を残す処理が必要です。枝先の枝がない場合のself.ctより大きい場合を参照してください。")
-                        line = D.detect_line(limg)
-                        last_line_list.append(line)
-                raise ValueError
-            
-            if xy in branch_point:
-                branch_point.remove(xy) #注目している1点近傍点をbranch_pointから削除
-        
-        return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list
+                    nlabels, line_labels, stats, _ = cv2.connectedComponentsWithStats(line_img_copy)
+                    while len(stats) > 3:
+                        skeleton, stats, branch_point, ad_bra, ad_branch_point, limg_list, delete_point = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point)
+                        line_labels[skeleton == 0] = 0 
+                        min_label1 = self.search_min_line(stats, branch_end_point, limg_list)
+                        if min_label1 >= 0:
+                            if stats[min_label1][4] < self.ct:
+                                # limg = np.zeros((height, width))
+                                # limg[line_labels == min_label1] = 1
+                                limg = limg_list[min_label1-1]
+                                skeleton[limg > 0] = 0
+                                delete_length = stats[min_label1][4]
+                                # line_labels[line_labels > min_label1] -= 1
+                                nlabels -= 1
+                                stats = np.delete(stats, min_label1, 0) #statsからmin_label1番目の行を削除
+                            else:
+                                delete_point.append(xy)
+                                delete_length = 0
 
-    def cut_branch_on_branch(self, skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list):
+                            if xy in branch_point:
+                                branch_point.remove(xy)
+
+        if xy in branch_point:
+            branch_point.remove(xy)
+        
+        return skeleton, branch_point, ad_bra, ad_branch_point, delete_length, delete_point
+
+    def cut_branch_on_branch(self, skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point):
         MI = MakeImage()
         limg_list = []
         #各線ごとに分岐点が含まれるか確かめ、含まれている場合はその分岐線から削除する
@@ -870,7 +956,7 @@ class Skeletonize():
                     if self.check_branch_point(limg, xy2):
                         continue
                     skeleton -= limg
-                    limg, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list = self.cutting(limg, xy2, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list) #cuttingにbrabranchの座標を分岐点として枝切り
+                    limg, branch_point, ad_bra, ad_branch_point, delete_length, delete_point = self.cutting(limg, xy2, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point) #cuttingにbrabranchの座標を分岐点として枝切り
                     stats[i][4] -= delete_length
                     skeleton += limg
 
@@ -881,13 +967,13 @@ class Skeletonize():
                     if self.check_branch_point(limg, xy2):
                         continue
                     skeleton -= limg
-                    limg, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list = self.ad_cutting(limg, xy2, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list) #ad_cuttingにad_brabranchの座標を分岐点として枝切り
+                    limg, branch_point, ad_bra, ad_branch_point, delete_length, delete_point = self.ad_cutting(limg, xy2, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point) #ad_cuttingにad_brabranchの座標を分岐点として枝切り
                     stats[i][4] -= delete_length
                     skeleton += limg
 
             limg_list.append(limg)
 
-        return skeleton, stats, branch_point, ad_bra, ad_branch_point, last_line_list, interpolate_line_list, limg_list
+        return skeleton, stats, branch_point, ad_bra, ad_branch_point, limg_list, delete_point
 
     def check_branch_point(self, limg, branch_point):
         kernel = limg[branch_point[0]-1:branch_point[0]+2, branch_point[1]-1:branch_point[1]+2]
@@ -909,18 +995,20 @@ class Skeletonize():
         return -1
 
     def select_cut_branch(self, nlabels, limg_list, branch_point, branch_end_point):
-        line_list, theta_list, end_point, len_list = [], [], [], []
+        line_list, end_point, len_list, end_point2 = [], [], [], []
 
-        start_index = 15
+        limg_list_copy = limg_list.copy()
         no_ep_index = []
         count = 0
         for i in range(0, nlabels-1):
-            flag = 0
-            limg = limg_list[i].copy()
+            limg = limg_list_copy[i].copy()
+            # V = Visualize()
+            # V.visualize_1img(limg)
             if self.branch_end_point_check(limg, branch_end_point):
                 no_ep_index.append(count)
-                flag = 1
             for point in branch_point:
+                # xy = get_neighbor(point, limg)[0]
+                # break
                 try:
                     xy = get_neighbor(point, limg)[0]
                     break
@@ -929,59 +1017,12 @@ class Skeletonize():
             
             end_point.append(xy)
             line = self.extract_line(xy, limg)
+            end_point2.append(line[-1])
             len_list.append(len(line))
             line_list.append(line)
-            if len_list[-1] <= 25 and flag == 0:
-                continue
-            theta = self.calculate_direction(line, start_index, len_list[-1])
-            theta = self.direction16(theta)
-            theta_list.append([theta, i])  
             count += 1
 
-        if len(theta_list) < 2:
-            connect_limg = limg_list[theta_list[0][1]]
-            not_connect = list(range(0, nlabels-1))
-            not_connect.remove(theta_list[0][1])
-            not_connect_line_list = []
-            not_connect_len = 0
-            for index in not_connect:
-                not_connect_line_list.append(line_list[index])
-                not_connect_len += len(line_list[index])
-            return connect_limg, not_connect, not_connect_line_list, not_connect_len, []
-
-        theta_combination  = []
-        if len(no_ep_index) == 0:
-            theta_combination = list(itertools.combinations(theta_list, 2))
-        elif len(no_ep_index) == 1:
-            no_ep_theta = theta_list[no_ep_index[0]]
-            for i, theta in enumerate(theta_list):
-                if i == no_ep_index[0]:
-                    continue
-                theta_combination.append([no_ep_theta, theta])
-        elif len(no_ep_index) == 2:
-            theta_combination.append([theta_list[no_ep_index[0]], theta_list[no_ep_index[1]]])
-        else:
-            raise ValueError("select_cut_branch")
-            
-        sum_theta = [np.abs(np.abs(thetas[0][0]-thetas[1][0])-180) for thetas in theta_combination]
-        connect_index_list = [index[1] for index in theta_combination[np.argmin(sum_theta)]]
-        connect_limg = np.zeros((height, width), dtype = np.uint8)
-        for index in connect_index_list:      
-            connect_limg += limg_list[index]
-        interpolate_img = np.zeros((height, width), dtype=np.uint8)
-        interpolate_img = cv2.line(interpolate_img, [end_point[connect_index_list[0]][1], end_point[connect_index_list[0]][0]], [end_point[connect_index_list[1]][1], end_point[connect_index_list[1]][0]], 1, 1)
-        connect_limg += interpolate_img
-        
-        interpolate_line = self.extract_line(end_point[connect_index_list[0]] , interpolate_img)
-        all_index = list(range(0, nlabels-1))
-        not_connect = list(set(connect_index_list)^set(all_index))
-        not_connect_line_list = []
-        not_connect_len = 0
-        for index in not_connect:
-            not_connect_line_list.append(line_list[index][5:])
-            not_connect_len += len_list[index]
-
-        return connect_limg, not_connect, not_connect_line_list, not_connect_len, interpolate_line
+        return line_list, end_point2
         
     def branch_end_point_check(self, limg, branch_end_point):
         for point in branch_end_point:
@@ -1023,23 +1064,23 @@ class Skeletonize():
 
         return theta
 
-    def ad_cutting(self, skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list):
+    def ad_cutting(self, skeleton, xy, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point):
         delete_length = 0
 
         if not xy in ad_bra:
-            return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, 0, interpolate_line_list
+            return skeleton, branch_point, ad_bra, ad_branch_point, 0, delete_point
         coods = ad_branch_point[ad_bra.index(xy)] #座標xyが含まれている3点分岐点をad_branch_pointから取得する
 
         #ad_bra, ad_branch_pointに入っている座標xyがすでにskeletonから消えている場合は、ad_bra, aad_branch_pointから削除して返却
         if skeleton[xy[0]][xy[1]] == 0:
             ad_bra.remove(xy) #ad_braから座標xyを削除
             ad_branch_point.remove(coods) #ad_branch_pointから座標群coodsを削除
-            return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, 0, interpolate_line_list
+            return skeleton, branch_point, ad_bra, ad_branch_point, 0, delete_point
 
         for cood in coods:
             kernel = skeleton[cood[0]-1:cood[0]+2, cood[1]-1:cood[1]+2]
             if np.sum(kernel) <= 3:
-                return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, 0, interpolate_line_list
+                return skeleton, branch_point, ad_bra, ad_branch_point, 0, delete_point
 
         x, y = [], []
         line_img_copy = np.uint8(skeleton.copy()) #skeletonをコピーして、line_img_copyとする
@@ -1051,51 +1092,35 @@ class Skeletonize():
 
         #ラベルが3つより多ければその分岐点にはまだ枝が残っている
         while len(stats) > 3:
-            skeleton, stats, branch_point, ad_bra, ad_branch_point, last_line_list, interpolate_line_list, limg_list = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, last_line_list, interpolate_line_list)
+            skeleton, stats, branch_point, ad_bra, ad_branch_point, limg_list, delete_point = self.cut_branch_on_branch(skeleton, line_labels, nlabels, stats, branch_point, ad_bra, ad_branch_point, branch_end_point, delete_point)
             line_labels[skeleton == 0] = 0 
             min_label1 = self.search_min_line(stats, branch_end_point, limg_list)
             if min_label1 >= 0:
                 if stats[min_label1][4] < self.ct:
-                    # limg = np.zeros((height, width))
-                    # limg[line_labels == min_label1] = 1
                     limg = limg_list[min_label1 - 1]
                     skeleton[limg > 0] = 0
                     delete_length = stats[min_label1][4]
-                    # line_labels[line_labels > min_label1] -= 1
                     nlabels -= 1
                     stats = np.delete(stats, min_label1, 0) #statsからmin_label1番目の行を削除
 
-                    #分岐点の削除(ただし、全ての分岐点を削除すれば線が途切れてしまうので、どれを消すか決める)
                     value = []
-                    #3点連結の各分岐点の近傍点を計算、valueに格納
                     for cood in coods:
                         value.append(np.sum(skeleton[cood[0]-1:cood[0]+2, cood[1]-1:cood[1]+2]))
                     check_value = np.where(np.array(value) >= 4)[0] #値が4以上となるvalueの添字を取得
                     ad_value = np.where(np.array(value) == 3)[0] #値が3となるvalueの添字を取得
-                    #値が4以上となる分岐点が2点で、値が3となる分岐点が存在する場合
                     if len(check_value) == 2 and len(ad_value) > 0:
                         skeleton[coods[ad_value[0]][0]][coods[ad_value[0]][1]] = 0 #値が3となる分岐点を削除
                 else: 
-                    skeleton, not_connect_index, last_line, not_connect_len, interpolate_line = self.select_cut_branch(nlabels, limg_list, coods, branch_end_point)
-                    interpolate_line_list.append(interpolate_line)
-                    delete_length = not_connect_len
-                    not_connect_index = np.sort(not_connect_index)[::-1]
-                    for index in not_connect_index:
-                        # line_labels[line_labels > index] -= 1
-                        stats = np.delete(stats, index, 0)
-                        nlabels -= 1
-                    last_line_list.extend(last_line)
-                    # print("skeleton")
-                    # plt.imshow(skeleton)
-                    # plt.show()
+                    delete_point.append(xy)
+                    stats = []
 
                 if xy in ad_bra:  
                     ad_bra.remove(xy)
                     ad_branch_point.remove(coods)
             else:
-                return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list
-        
-        return skeleton, branch_point, ad_bra, ad_branch_point, last_line_list, delete_length, interpolate_line_list
+                return skeleton, branch_point, ad_bra, ad_branch_point, delete_length, delete_point
+
+        return skeleton, branch_point, ad_bra, ad_branch_point, delete_length, delete_point
 
 class Sort():
 
@@ -1264,17 +1289,111 @@ class Sort():
             else:
                 new_sorted_skel_list.append(skel)
         
+        first_skip_skel2region = []
         for i in reversed(first_skip_index):
+            first_skip_skel2region.append(new_skel2region_index[i])
             del new_skel2region_index[i]
                 
-        return first_skip_index, new_sorted_skel_list, new_skel2region_index, first_skip_skel
+        first_skip_skel2region = first_skip_skel2region[::-1]
+
+        return new_sorted_skel_list, new_skel2region_index, first_skip_skel, first_skip_skel2region
+
+def sunder_curve(skel_list, skel2region_index):
+    sunder_idnex, sunder_info = [], []
+
+    for j, skel in enumerate(skel_list):
+        length = len(skel)
+        curvatures, curvatures_index = [], []
+        interval = 5
+        curve_threshold = 50
+
+        # V = Visualize()
+        D = Detect()
+        MI = MakeImage()
+        skel_color = MI.make_image(skel, 255)
+        # skel_color_copy = skel_color.copy()
+
+        for i in np.arange(interval, length-interval, interval):
+            dxn = skel[i][0] - skel[i - interval][0]
+            dxp = skel[i + interval][0] - skel[i][0]
+            dyn = skel[i][1] - skel[i - interval][1]
+            dyp = skel[i + interval][1] - skel[i][1]
+            thetaOA = math.degrees(math.atan2(dyn, dxn))
+            thetaOB = math.degrees(math.atan2(dyp, dxp))
+            dif_theta = thetaOB - thetaOA
+            if dif_theta > 180:
+                dif_theta = 360 - dif_theta
+            elif dif_theta < -180:
+                dif_theta = 360 + dif_theta
+            curvatures.append(int(dif_theta))
+            curvatures_index.append(i)
+            # skel_color[skel[i][0]][skel[i][1]] = [255, 0, 0]
+
+        if length - (i+interval) >= int(interval*3/4):
+            i += interval
+            dxn = skel[i][0] - skel[i - interval][0]
+            dxp = skel[-1][0] - skel[i][0]
+            dyn = skel[i][1] - skel[i - interval][1]
+            dyp = skel[-1][1] - skel[i][1]
+            thetaOA = math.degrees(math.atan2(dyn, dxn))
+            thetaOB = math.degrees(math.atan2(dyp, dxp))
+            dif_theta = thetaOB - thetaOA
+            if dif_theta > 180:
+                dif_theta = 360 - dif_theta
+            elif dif_theta < -180:
+                dif_theta = 360 + dif_theta
+            curvatures.append(int(dif_theta))
+            curvatures_index.append(i)
+            # skel_color[skel[i][0]][skel[i][1]] = [255, 0, 0]
+
+        # print("max_curvatures = ", np.max(np.abs(curvatures)))
+        # print("curvature = ", curvatures)
+        abs_curvatures = np.abs(curvatures)
+        sorted_curvature_index = np.argsort(abs_curvatures)[::-1]
+        max_curvature = np.max(abs_curvatures)
+
+        if max_curvature > curve_threshold:
+            sunder_idnex.append(j)
+            for curve_index in sorted_curvature_index:
+                curve = curvatures[curve_index]
+                abs_curve = abs(curve)
+                if abs_curve > curve_threshold:
+                    overThre_index = curvatures.index(curve)
+                    sindex = curvatures_index[overThre_index]
+                    point = skel[sindex]
+                    skel_color = cv2.circle(skel_color, (point[1], point[0]), 3, [0, 0, 0], -1)
+                else:
+                    break
+            sunder_lines = D.detect_line(skel_color)
+            region_index = skel2region_index[j]
+            sunder_info.append([j, region_index, sunder_lines])
+            # V.visualize_1img(skel_color_copy)
+            # V.visualize_region(sunder_lines)
+
+    sunder_info = sunder_info[::-1]
+    for info in sunder_info:
+        skel_index = info[0]
+        region_index = info[1]
+        sunder_lines = info[2]
+        
+        del skel_list[skel_index]
+        del skel2region_index[skel_index]
+        line_num = 0
+        for line in sunder_lines:
+            if len(line) > 20:
+                skel_list.append(line)
+                line_num += 1
+        for _ in range(line_num):
+            skel2region_index.append(region_index)
+
+    return skel_list, skel2region_index
 
 class ConnectLine():
 
     def __init__(self):
         self.full_length = cfg["full_length"]
         self.curvature = cfg["curvatures"]
-        self.error_length = self.full_length//20
+        self.error_length = self.full_length//10
         self.interval = self.full_length//10
 
     def __main__(self, sorted_skel_list, end_point_list):
@@ -1292,6 +1411,7 @@ class ConnectLine():
         count_list, switch_list, flat_combi, flat_count = [], [], [], []
         cost, index = [], []
         detail_cost = []
+        cost1d = []
         interpolate_list = []
         min_distance_threshold = 10
         cost_threshold = 2
@@ -1321,7 +1441,7 @@ class ConnectLine():
                         depth2 = ends[i][j][2]
 
                         sum_theta = np.abs(np.abs(theta1 - theta2) - 180)
-                        if sum_theta > 145:
+                        if sum_theta > 90:
                             continue
                         sum_theta /= 180
 
@@ -1329,7 +1449,7 @@ class ConnectLine():
                         dif_depth /= 255
 
                         distance = int(np.sqrt((end1[0]-end2[0])**2 + (end1[1]-end2[1])**2))
-                        if distance > full_length/2:
+                        if distance > self.full_length//5:
                             continue
                         cost_distance = distance / full_length
 
@@ -1355,7 +1475,8 @@ class ConnectLine():
                         cost[count][switch].append(par_cost)
                         index[count][switch].append([i, j]) #countが注目細線のインデックス、switchが端点のインデックス、iとjがペアとなる細線のインデックスと端点のインデックス
                         detail_cost[count][switch].append([alpha*cost_distance, beta*sum_theta, gamma*dif_theta, delta*dif_depth])
-                        # if par_cost < 1.5:
+                        cost1d.append([count, switch, i, j, par_cost])
+                        # if par_cost < 2:
                         #     print("start")
                         #     print("count, switch = ", count, switch)
                         #     print("i, j = ", i, j)
@@ -1373,117 +1494,131 @@ class ConnectLine():
         cost.append([[], []])
         index.append([[], []])
 
-        flat_cost = sum(sum(cost, []), []) #costを一次元リストに変換
-        if flat_cost == []:
-            return [], [], [], []
+        sorted_cost1d = sorted(cost1d, key = lambda x:x[4])
 
         correct_count_index_list = []
-        for count in range(0, skel_num-1):
-            if count in correct_count_index_list:
+        for cinfo in sorted_cost1d:
+            count = cinfo[0]
+            switch = cinfo[1]
+            vs_count = cinfo[2]
+            vs_switch = cinfo[3]
+            par_cost = cinfo[4]
+            if any(c in correct_count_index_list for c in (count, vs_count)):
                 continue
-            for switch in range(0, 2):
-                if [count, switch] in flat_combi:
-                    continue
-                CScosts = cost[count][switch]
-                sorted_CScosts = np.argsort(CScosts)
-                skel1 = skel_list[count]
-                end1 = ends[count][switch][0:2]
-                for i in sorted_CScosts:
-                    if CScosts[i] > cost_threshold:
-                        break
-                    vs_count = index[count][switch][i][0]
-                    if vs_count in correct_count_index_list:
-                        continue
-                    vs_switch = index[count][switch][i][1]
-                    if [vs_count, vs_switch] in flat_combi:
-                        continue
-                    skel2 = skel_list[vs_count]
-                    end2 = ends[vs_count][vs_switch][0:2]
-                    line, interpolate = self.connect2skels(skel1, skel2, end1, end2)
-                    length = len(line)
-                    if length > self.full_length + self.error_length or length <= self.interval*2:
-                        continue
-                    if length < 31:
-                        continue
-                    
-                    curvatures = self.calc_curvature(line)
-                    flag, _ = self.cal_dif_curvature(curvatures)
-                    check = 0
-                    if flag == 1:
-                        explored = [count, vs_count]
-                        flat_count_copy = flat_count.copy()
-                        count_list_index_count = []
-                        count_list_index_vs_count = []
-                        if count in flat_count:
-                            check += 1
-                            cindex_count = count  
-                            
-                            while 1:
-                                cindex = flat_count_copy.index(cindex_count)
-                                count_list_index_count.append(cindex//2)
-                                flat_count_copy[cindex] = -1
-                                if cindex % 2 == 0:
-                                    vs_cindex = cindex + 1
-                                else:
-                                    vs_cindex = cindex - 1         
-                                cindex_count = flat_count_copy[vs_cindex]
-                                flat_count_copy[vs_cindex] = -1
-                                explored.append(cindex_count)
-                                if not cindex_count in flat_count_copy:
-                                    break
-                            
-                        if vs_count in flat_count:
-                            check += 1
-                            cindex_vs_count = vs_count                          
-                            while 1:
-                                cindex = flat_count_copy.index(cindex_vs_count)
-                                count_list_index_vs_count.append(cindex//2)
-                                flat_count_copy[cindex] = -1
-                                if cindex % 2 == 0:
-                                    vs_cindex = cindex + 1
-                                else:
-                                    vs_cindex = cindex - 1   
-                                cindex_vs_count = flat_count_copy[vs_cindex]
-                                flat_count_copy[vs_cindex] = -1
-                                explored.append(cindex_vs_count)
-                                if not cindex_vs_count in flat_count_copy:
-                                    break
-                        flat_count.append(count)
-                        flat_count.append(vs_count)
-                        flat_combi.append([count, switch])
-                        flat_combi.append([vs_count, vs_switch])
-                        count_list.append([count, vs_count])
-                        switch_list.append([switch, vs_switch])
-                        interpolate_list.append(interpolate)
-                        
-                        if check > 0:    
-                            count_list_index = count_list_index_count[::-1]
-                            curren_count_list_index = len(count_list)-1
-                            count_list_index.append(curren_count_list_index)
-                            count_list_index.extend(count_list_index_vs_count)
-                            end_count = [ei for ei in explored if flat_count.count(ei) == 1]
-                            correct_count_index, delete_count_list_index = self.cal_curvature_of_connected_several_lines(skel_list, explored, count_list, count_list_index, interpolate_list, end_count, curren_count_list_index)
-                            correct_count_index_list.extend(correct_count_index)
-                            if not delete_count_list_index == []:
-                                del count_list[delete_count_list_index]
-                                del switch_list[delete_count_list_index]
-                                del interpolate_list[delete_count_list_index]
-                                del flat_count[delete_count_list_index*2+1]
-                                del flat_count[delete_count_list_index*2]
-                                del flat_combi[delete_count_list_index*2+1]
-                                del flat_combi[delete_count_list_index*2]
-                        break
+            if any(c in count_list for c in ([count, vs_count], [vs_count, count])):
+                continue
+            if any(c in flat_combi for c in ([count, switch], [vs_count, vs_switch])):
+                continue
+            if par_cost > cost_threshold:
+                break
+            skel1 = skel_list[count]
+            end1 = ends[count][switch][0:2]
+            skel2 = skel_list[vs_count]
+            end2 = ends[vs_count][vs_switch][0:2]
+            line, interpolate = self.connect2skels(skel1, skel2, list(end1), list(end2))
+            length = len(line)
+            if self.full_length + self.error_length < length:
+                continue
+
+            # V = Visualize()
+            # V.visualize_1region(line)
+
+            curvatures = self.cal_curvature(line)
+            flag, _ = self.cal_dif_curvature(curvatures, line = line)
+            check = 0#過去に接続した線が含まれているかのフラグ
+            if flag == 1:
+                explored = [count, vs_count]#今回の接続する線のindex
+                flat_count_copy = flat_count.copy()#すでに接続した線のindex
+                count_list_index_count = []
+                count_list_index_vs_count = []
+
+                if count in flat_count:#今回の接続する線が過去に接続候補として上がっているか
+                    check += 1
+                    cindex_count = count
+                    while 1:
+                        cindex = flat_count_copy.index(cindex_count)#今回の線のflat_countにおけるindex
+                        count_list_index_count.append(cindex//2)#flat_countの半分がcount_listのindexになる
+                        flat_count_copy[cindex] = -1
+                        #過去にcountの線と接続することになった線のflat_countにおけるindexを求める
+                        if cindex % 2 == 0:
+                            vs_cindex = cindex + 1
+                        else:
+                            vs_cindex = cindex - 1
+                        cindex_count = flat_count_copy[vs_cindex]#過去の相方の線のindex
+                        flat_count_copy[vs_cindex] = -1
+                        explored.append(cindex_count)#接続することになった３つの線を加える
+                        if not cindex_count in flat_count_copy:
+                            break
         
-        # print(count_list)
-        # print(switch_list)
-        # print(flat_combi)
-        # print(flat_count)
-        # show(count_list, switch_list, skel_list)
-        # raise ValueError
+                if vs_count in flat_count_copy:
+                    check += 1
+                    cindex_vs_count = vs_count
+                    while 1:
+                        cindex = flat_count_copy.index(cindex_vs_count)
+                        count_list_index_vs_count.append(cindex//2)
+                        flat_count_copy[cindex] = -1
+                        if cindex % 2 == 0:
+                            vs_cindex = cindex + 1
+                        else:
+                            vs_cindex = cindex - 1
+                        cindex_vs_count = flat_count_copy[vs_cindex]
+                        flat_count_copy[vs_cindex] = -1
+                        explored.append(cindex_vs_count)
+                        if not cindex_vs_count in flat_count_copy:
+                            break
+
+                flat_count.append(count)
+                flat_count.append(vs_count)
+                flat_combi.append([count, switch])
+                flat_combi.append([vs_count, vs_switch])
+                count_list.append([count, vs_count])
+                switch_list.append([switch, vs_switch])
+                interpolate_list.append(interpolate)
+
+                # V = Visualize()
+                # MI = MakeImage()
+                # limg = np.zeros((height, width, 3))
+                # limg += MI.make_colorimage(skel_list[flat_count[-2]], 1)
+                # limg += MI.make_colorimage(skel_list[flat_count[-1]], 1)
+                # point1 = skel_list[flat_count[-2]][-1*switch_list[-1][0]]
+                # point2 = skel_list[flat_count[-1]][-1*switch_list[-1][1]]
+                # limg = cv2.circle(limg, (point1[1], point1[0]), 3, [255,0,0],-1)
+                # limg = cv2.circle(limg, (point2[1], point2[0]), 3, [255, 0, 0], -1)
+                # print(flat_count[-2], flat_count[-1])
+                # print(switch_list[-1][0], switch_list[-1][1])
+                # V.visualize_1img(limg)
+
+                #３つの線を繋いで長さを求める
+                if check > 0:
+                    count_list_index = count_list_index_count[::-1]#逆順に変更
+                    current_count_list_index = len(count_list)-1#現在のcount_listのindexを取得
+                    count_list_index.append(current_count_list_index)
+                    count_list_index.extend(count_list_index_vs_count)#接続先の線と接続することが決まっている線のcount_listのindex
+                    end_count = [ei for ei in explored if flat_count.count(ei) == 1]#端に位置する線のindex
+                    if end_count == []:
+                        del flat_count[-1]
+                        del flat_count[-1]
+                        del flat_combi[-1]
+                        del flat_combi[-1]
+                        del count_list[-1]
+                        del switch_list[-1]
+                        del interpolate_list[-1]
+                    else:
+                        correct_count_index, delete_count_list_index = self.cal_curvature_of_connected_several_lines(skel_list, count_list, count_list_index, interpolate_list, end_count, current_count_list_index)
+                        correct_count_index_list.extend(correct_count_index)
+                        if not delete_count_list_index == []:
+                            del count_list[delete_count_list_index]
+                            del switch_list[delete_count_list_index]
+                            del interpolate_list[delete_count_list_index]
+                            del flat_count[delete_count_list_index*2+1]
+                            del flat_count[delete_count_list_index*2]
+                            del flat_combi[delete_count_list_index*2+1]
+                            del flat_combi[delete_count_list_index*2]
+                # break
 
         return count_list, switch_list, ends, interpolate_list
 
-    def cal_curvature_of_connected_several_lines(self, skel_list, explored, count_list, count_list_index, interpolate_list, end_count, current_count_list_index):
+    def cal_curvature_of_connected_several_lines(self, skel_list, count_list, count_list_index, interpolate_list, end_count, current_count_list_index):
         current_count = [i for i in count_list[count_list_index[0]] if i in end_count][0]
         connected_count_list = [current_count]
         line = skel_list[current_count].copy()
@@ -1510,9 +1645,12 @@ class ConnectLine():
 
         if length > self.full_length + self.error_length:
             return [], current_count_list_index
-            
-        curvature = self.calc_curvature(line)
-        flag, value = self.cal_dif_curvature(curvature, 1)
+
+        V = Visualize()
+        # V.visualize_1region(line)
+        
+        curvature = self.cal_curvature(line)
+        flag, value = self.cal_dif_curvature(curvature, line = line, flag = 0)
 
         if flag == 1:
             if self.full_length - self.error_length < length and length < self.full_length + self.error_length:
@@ -1523,20 +1661,23 @@ class ConnectLine():
             del line_separate_copy[0]
             del line_separate_copy[0]
             line0 = [point for separate in line_separate_copy for point in separate]
-            curvature0 = self.calc_curvature(line0)
-            flag, value0 = self.cal_dif_curvature(curvature0)
+            curvature0 = self.cal_curvature(line0)
+            flag, value0 = self.cal_dif_curvature(curvature0, line = line0, flag = 0)
+            # V.visualize_1region(line0)
 
             line_separate_copy = line_separate.copy()
             del line_separate_copy[-1]
             del line_separate_copy[-1]
             line1 = [point for separate in line_separate_copy for point in separate]
-            curvature1 = self.calc_curvature(line1)
-            flag, value1 = self.cal_dif_curvature(curvature1)
+            curvature1 = self.cal_curvature(line1)
+            flag, value1 = self.cal_dif_curvature(curvature1, line = line1, flag = 0)
+            # V.visualize_1region(line1)
 
+            # print(value0, value1)
             if value0 < value1:
-                return [], count_list_index[-1]
-            else:
                 return [], count_list_index[0]
+            else:
+                return [], count_list_index[-1]
 
     def which_is_neighbor(self, line, interpolate):
         lends = [line[0], line[-1]]
@@ -1548,7 +1689,7 @@ class ConnectLine():
                     return -i, -j 
         raise ValueError
 
-    def cal_dif_curvature(self, curvature2, flag=0):
+    def cal_dif_curvature(self, curvature2, line = [], flag=0):
         curvature1 = self.curvature
         length2 = len(curvature2)
         dif_len = len(curvature1) - length2
@@ -1604,13 +1745,28 @@ class ConnectLine():
 
         # if flag == 1:
         #     print("min_value = ", min_value)
-        #     x = list(range(len(curvature1)))
-        #     x2 = list(range(min_index,min_index+length2))
+        #     V = Visualize()
+        #     V.visualize_1region(line)
+
+        #     fig = plt.figure()
+        #     ax1 = fig.add_subplot(1, 2, 1)
+        #     ax2 = fig.add_subplot(1, 2, 2)
+
+        #     x = list(range(len(curvature1_plus)))
+        #     x2 = list(range(min_index_plus,min_index_plus+length2))
         #     if np.max(x) < np.max(x2):
         #         raise ValueError
-        #     fig, ax = plt.subplots()
-        #     ax.plot(x, curvature1, color="red")
-        #     ax.plot(x2, curvature2, color="blue")
+        #     ax1.plot(x, curvature1_plus, color="red")
+        #     ax1.plot(x2, curvature2, color="blue")
+
+        #     x = list(range(len(curvature1_minus)))
+        #     x2 = list(range(min_index_minus,min_index_minus+length2))
+        #     if np.max(x) < np.max(x2):
+        #         raise ValueError
+        #     ax2.plot(x, curvature1_minus, color="red")
+        #     ax2.plot(x2, curvature2, color="blue")
+
+        #     fig.tight_layout()
         #     plt.show()
 
         if min_value < 12:
@@ -1627,12 +1783,12 @@ class ConnectLine():
             return 1, min_value
         return 0, min_value
 
-    def calc_curvature(self, line):
-        length = len(line)
-        num = 1
+    def cal_curvature(self, line):
         curvatures = []
+        num = 1
+        length = len(line)
         interval = 5
-        maxi = 15
+        maxi = 10
         dxn = line[15][0] - line[5][0]
         dyn = line[15][1] - line[5][1]
         first_theta = math.degrees(math.atan2(dyn, dxn))
@@ -1649,11 +1805,11 @@ class ConnectLine():
                 elif theta < -180:
                     theta = 360 + theta
                 theta_list.append(theta)
-
-            for l in range(0, len(theta_list)-1):
-                dt = theta_list[l+1] - theta_list[l]
+            
+            for i in range(0, len(theta_list)-1):
+                dt = theta_list[i+1] - theta_list[i]
                 if abs(dt) > 180:
-                    theta_list[l+1] *= -1
+                    theta_list[i+1] *= -1
             dif_theta = np.sum(theta_list)
             dif_theta /= (maxi//5)
 
@@ -1666,6 +1822,19 @@ class ConnectLine():
                 dif_theta *= -1
             curvatures.append(dif_theta)
             num += 1
+
+        # len_c = len(curvatures)
+        # der_curvatures = []
+        # for i in range(3, len_c-3):
+        #     dy = curvatures[i+3] - curvatures[i-3]
+        #     dx = 6
+        #     der_curvatures.append(dy/dx)
+
+        # x = list(range(num-1))
+        # print(x)
+        # print(curvatures)
+        # plt.plot(x, curvatures)
+        # plt.show()
 
         return curvatures
 
@@ -1709,8 +1878,9 @@ class ConnectLine():
             theta1 = self.direction16(theta1)
             roi = depth_img[point11[0]-1:point11[0]+2, point11[1]-1:point11[1]+2]
             if len(roi) == 0 or list(roi[0]) == []:
-                point11 = self.modify_point(point11)
-                roi = depth_img[point11[0]-1:point11[0]+2, point11[1]-1:point11[1]+2]
+                modified_point = self.modify_point(point11)
+                roi = depth_img[modified_point[0]-1:modified_point[0]+2, modified_point[1]-1:modified_point[1]+2]
+                point11 = np.array(skel[0])
             depth1 = np.max(roi)
             if depth1 == 0:
                 print("check point!!")
@@ -1725,8 +1895,9 @@ class ConnectLine():
             theta2 = self.direction16(theta2)
             roi2 = depth_img[point21[0]-1:point21[0]+2, point21[1]-1:point21[1]+2]
             if len(roi2) == 0 or list(roi2[0]) == []:
-                point21 = self.modify_point(point21)
-                roi2 = depth_img[point21[0]-1:point21[0]+2, point21[1]-1:point21[1]+2]
+                modified_point = self.modify_point(point21)
+                roi2 = depth_img[modified_point[0]-1:modified_point[0]+2, modified_point[1]-1:modified_point[1]+2]
+                point21 = np.array(skel[-1])
             depth2 = np.max(roi2)
             if depth2 == 0:
                 print("check point!!")
@@ -1879,27 +2050,33 @@ class ConnectLine():
 
         return correct_skel_index, correct_CL_index, connect_skel_index, connect_ep
 
-    def which_region_left(self, skip_region_list, skel2region_index, skel2region_index2, last_skel_index, first_skip_skel_index, correct_skel_index):
-        for index in first_skip_skel_index:
-            region_index = skel2region_index[index]
+    def which_region_left(self, skip_region_list, skel2region_index, first_skip_skel2region_index, last_region_index, first_skip_skel, correct_skel_index):
+        flat = []
+
+        # if not first_skip_skel2region_index == []:
+        #     raise ValueError("check first_skip_skel2region_index")
+
+        for i in range(len(first_skip_skel)):
+            region_index = first_skip_skel2region_index[i]
             if not region_index in skip_region_list:
                 skip_region_list.append(region_index)
 
+        flat_skel_index = []
         for indexes in correct_skel_index:
             for index in indexes:
-                region_index = skel2region_index2[index]
+                flat_skel_index.append(index)
+                region_index = skel2region_index[index]
                 if not region_index in skip_region_list:
                     skip_region_list.append(region_index)
-        
-        last_index = []
-        for index in last_skel_index:
-            skel_list = [i for i, x in enumerate(skel2region_index2) if x == index]
-            for index in skel_list:
-                if index in first_skip_skel_index or index in correct_skel_index:
-                    continue
-                last_index.append(index)
 
-        return skip_region_list, last_index
+        last_skel_index = []
+        for region_index in last_region_index:
+            skel_index = [i for i, si in enumerate(skel2region_index) if si == region_index]
+            for si in skel_index:
+                if not si in flat_skel_index:
+                    last_skel_index.append(si)
+
+        return skip_region_list, last_skel_index
 
 class CenterPoint():
 
@@ -2310,20 +2487,21 @@ class ConnectRegion():
 
     def __init__(self):
         self.full_length = cfg["full_length"] 
-        self.curvature = cfg["curvatures"]
         self.error_length = self.full_length//20
         self.interval = self.full_length//10
         self.line_length_threshold = self.full_length*0.08
 
     def point2line(self, center_points_list, last_index, sorted_skel_list, cp2region_index, skel2region_index):
         new_center_points_list, line_list, new_cp2region_index = [], [], []
+        #中心点の選別と点を結んで線形化
         for i, center_point in enumerate(center_points_list):
-            if len(center_point) > 3:
+            if len(center_point) > 3 and cp2region_index[i] in skel2region_index:
                 line = self.connect_points(center_point)
                 new_center_points_list.append(center_point)
                 line_list.append(line)
                 new_cp2region_index.append(cp2region_index[i])
         
+        #中心点のindexを入力すると細線のindexが帰ってくる(cp2skel_index)
         cp2skel_index = []
         for cri in new_cp2region_index:
             rsi = skel2region_index.index(cri)
@@ -2475,6 +2653,11 @@ class ConnectRegion():
             for index in indexes:
                 connect_ep_index_flat.append(index)
 
+        # print(connect_skel_index_flat)
+        # print(connect_ep_index_flat)
+        # show(connect_skel_index_flat, connect_ep_index_flat, line_list)
+        # input()
+
         skel_ep_comb = []
         for si, ei in zip(connect_skel_index_flat, connect_ep_index_flat):
             skel_ep_comb.append([si[0], ei[0]])
@@ -2505,6 +2688,7 @@ class ConnectRegion():
 
         cost_list, index_list = [], []
         detail_cost = []
+        cost1d = []
         min_distance_threshold = 10                                                                                        #distanceに対する閾値
         cost_threshold = 1.5
         alpha = 4
@@ -2535,10 +2719,12 @@ class ConnectRegion():
                         depth2 = depthes[m][n]
                         
                         sum_theta = np.abs(np.abs(theta1 - theta2) - 180)
+                        if sum_theta > 90:
+                            continue
                         sum_theta /= 180
 
                         distance = int(np.sqrt((end1[0]-end2[0])**2 + (end1[1]-end2[1])**2))                                #distanceの計算
-                        if distance > self.full_length/2:
+                        if distance > 100:
                             continue
                         cost_distance = distance / self.full_length
 
@@ -2567,102 +2753,118 @@ class ConnectRegion():
                         cost_list[count][switch].append(par_cost)
                         index_list[count][switch].append([m, n])
                         detail_cost[count][switch].append([alpha*cost_distance, beta*sum_theta, gamma*dif_theta, delta*dif_depth])
-        
+                        cost1d.append([count, switch, m, n, par_cost])
+
         cost_list.append([[], []])
         index_list.append([[], []])
 
-        flat_cost = sum(sum(cost_list, []), [])
-        if flat_cost == []:
-            return [], [], [], []
-
+        sorted_cost1d = sorted(cost1d, key = lambda x:x[4])
         correct_count_index_list = []
-        for count in range(0, line_num-1):
-            if count in correct_count_index_list:
+        for cinfo in sorted_cost1d:
+            count = cinfo[0]
+            switch = cinfo[1]
+            vs_count = cinfo[2]
+            vs_switch = cinfo[3]
+            par_cost = cinfo[4]
+            if any(c in correct_count_index_list for c in (count, vs_count)):
                 continue
-            for switch in (0, 1):
-                if [count, switch] in flat_combi:
-                    continue
-                CScosts = cost_list[count][switch]
-                sorted_CScosts = np.argsort(CScosts)
-                line1 = line_list[count]
-                end1 = ends[count][switch]
-                for i in sorted_CScosts:
-                    if CScosts[i] > cost_threshold:
-                        break
-                    vs_count = index_list[count][switch][i][0]
-                    if vs_count in correct_count_index_list:
-                        continue
-                    vs_switch = index_list[count][switch][i][1]
-                    if [vs_count, vs_switch] in flat_combi:
-                        continue
-                    line2 = line_list[vs_count]
-                    end2 = ends[vs_count][vs_switch]
-                    line, interpolate = CL.connect2skels(line1, line2, list(end1), list(end2))
-                    length = len(line)
-                    if length > self.full_length + self.error_length or length <= self.interval*2:
-                        continue
-                    if length < 31:
-                        continue
+            if any(c in count_list for c in ([count, vs_count], [vs_count, count])):
+                continue
+            if any(c in flat_combi for c in ([count, switch], [vs_count, vs_switch])):
+                continue
+            if par_cost > cost_threshold:
+                break
+            skel1 = line_list[count]
+            end1 = ends[count][switch][0:2]
+            skel2 = line_list[vs_count]
+            end2 = ends[vs_count][vs_switch][0:2]
+            line, interpolate = CL.connect2skels(skel1, skel2, list(end1), list(end2))
+            length = len(line)
+            if self.full_length + self.error_length < length:
+                continue
 
-                    curvatures = CL.calc_curvature(line)
-                    print(line)
-                    print(curvatures)
-                    flag, _ = CL.cal_dif_curvature(curvatures)
-                    check = 0
-                    if flag == 1:
-                        explored = [count, vs_count]
-                        flat_count_copy = flat_count.copy()
-                        count_list_index_count = []
-                        count_list_index_vs_count = []
-                        if count in flat_count:
-                            check += 1
-                            cindex_count = count
-                            while 1:
-                                cindex = flat_count_copy.index(cindex_count)
-                                count_list_index_count.append(cindex//2)
-                                flat_count_copy[cindex] = -1
-                                if cindex % 2 == 0:
-                                    vs_cindex = cindex + 1
-                                else:
-                                    vs_cindex = cindex - 1
-                                cindex_count = flat_count_copy[vs_cindex]
-                                flat_count_copy[vs_cindex] = -1
-                                explored.append(cindex_count)
-                                if not cindex_count in flat_count_copy:
-                                    break
-                    
-                        if vs_count in flat_count:
-                            check += 1
-                            cindex_vs_count = vs_count
-                            while 1:
-                                cindex = flat_count_copy.index(cindex_vs_count)
-                                count_list_index_vs_count.append(cindex//2)
-                                flat_count_copy[cindex] = -1
-                                if cindex % 2 == 0:
-                                    vs_cindex = cindex + 1
-                                else:
-                                    vs_cindex = cindex - 1
-                                cindex_vs_count = flat_count_copy[vs_cindex]
-                                flat_count_copy[vs_cindex] = -1
-                                explored.append(cindex_vs_count)
-                                if not cindex_vs_count in flat_count_copy:
-                                    break
+            curvatures = CL.cal_curvature(line)
+            flag, _ = CL.cal_dif_curvature(curvatures)
+            check = 0#過去に接続した線が含まれているかのフラグ
+            if flag == 1:
+                explored = [count, vs_count]#今回の接続する線のindex
+                flat_count_copy = flat_count.copy()#すでに接続した線のindex
+                count_list_index_count = []
+                count_list_index_vs_count = []
 
-                        flat_count.append(count)
-                        flat_count.append(vs_count)
-                        flat_combi.append([count, switch])
-                        flat_combi.append([vs_count, vs_switch])
-                        count_list.append([count, vs_count])
-                        switch_list.append([switch, vs_switch])
-                        interpolate_list.append(interpolate)
+                if count in flat_count:#今回の接続する線が過去に接続候補として上がっているか
+                    check += 1
+                    cindex_count = count
+                    while 1:
+                        cindex = flat_count_copy.index(cindex_count)#今回の線のflat_countにおけるindex
+                        count_list_index_count.append(cindex//2)#flat_countの半分がcount_listのindexになる
+                        flat_count_copy[cindex] = -1
+                        #過去にcountの線と接続することになった線のflat_countにおけるindexを求める
+                        if cindex % 2 == 0:
+                            vs_cindex = cindex + 1
+                        else:
+                            vs_cindex = cindex - 1
+                        cindex_count = flat_count_copy[vs_cindex]#過去の相方の線のindex
+                        flat_count_copy[vs_cindex] = -1
+                        explored.append(cindex_count)#接続することになった３つの線を加える
+                        if not cindex_count in flat_count_copy:
+                            break
+        
+                if vs_count in flat_count_copy:
+                    check += 1
+                    cindex_vs_count = vs_count
+                    while 1:
+                        cindex = flat_count_copy.index(cindex_vs_count)
+                        count_list_index_vs_count.append(cindex//2)
+                        flat_count_copy[cindex] = -1
+                        if cindex % 2 == 0:
+                            vs_cindex = cindex + 1
+                        else:
+                            vs_cindex = cindex - 1
+                        cindex_vs_count = flat_count_copy[vs_cindex]
+                        flat_count_copy[vs_cindex] = -1
+                        explored.append(cindex_vs_count)
+                        if not cindex_vs_count in flat_count_copy:
+                            break
 
-                    if check > 0:
-                        count_list_index = count_list_index_count[::-1]
-                        current_count_list_index = len(count_list)-1
-                        count_list_index.append(current_count_list_index)
-                        count_list_index.extend(count_list_index_vs_count)
-                        end_count = [ei for ei in explored if flat_count.count(ei) == 1]
-                        correct_count_index, delete_count_list_index = CL.cal_curvature_of_connected_several_lines(line_list, explored, count_list, count_list_index, interpolate_list, end_count, current_count_list_index)
+                flat_count.append(count)
+                flat_count.append(vs_count)
+                flat_combi.append([count, switch])
+                flat_combi.append([vs_count, vs_switch])
+                count_list.append([count, vs_count])
+                switch_list.append([switch, vs_switch])
+                interpolate_list.append(interpolate)
+
+                # V = Visualize()
+                # MI = MakeImage()
+                # limg = np.zeros((height, width, 3))
+                # limg += MI.make_colorimage(skel_list[flat_count[-2]], 1)
+                # limg += MI.make_colorimage(skel_list[flat_count[-1]], 1)
+                # point1 = skel_list[flat_count[-2]][-1*switch_list[-1][0]]
+                # point2 = skel_list[flat_count[-1]][-1*switch_list[-1][1]]
+                # limg = cv2.circle(limg, (point1[1], point1[0]), 3, [255,0,0],-1)
+                # limg = cv2.circle(limg, (point2[1], point2[0]), 3, [255, 0, 0], -1)
+                # print(flat_count[-2], flat_count[-1])
+                # print(switch_list[-1][0], switch_list[-1][1])
+                # V.visualize_1img(limg)
+
+                #３つの線を繋いで長さを求める
+                if check > 0:
+                    count_list_index = count_list_index_count[::-1]#逆順に変更
+                    current_count_list_index = len(count_list)-1#現在のcount_listのindexを取得
+                    count_list_index.append(current_count_list_index)
+                    count_list_index.extend(count_list_index_vs_count)#接続先の線と接続することが決まっている線のcount_listのindex
+                    end_count = [ei for ei in explored if flat_count.count(ei) == 1]#端に位置する線のindex
+                    if end_count == []:
+                        del flat_count[-1]
+                        del flat_count[-1]
+                        del flat_combi[-1]
+                        del flat_combi[-1]
+                        del count_list[-1]
+                        del switch_list[-1]
+                        del interpolate_list[-1]
+                    else:
+                        correct_count_index, delete_count_list_index = CL.cal_curvature_of_connected_several_lines(line_list, count_list, count_list_index, interpolate_list, end_count, current_count_list_index)
                         correct_count_index_list.extend(correct_count_index)
                         if not delete_count_list_index == []:
                             del count_list[delete_count_list_index]
@@ -2672,7 +2874,7 @@ class ConnectRegion():
                             del flat_count[delete_count_list_index*2]
                             del flat_combi[delete_count_list_index*2+1]
                             del flat_combi[delete_count_list_index*2]
-                    break
+                break
 
         _, indiices = np.unique(count_list, axis = 0, return_index = True)
         range_list = list(range(0, len(count_list)))
@@ -2876,7 +3078,7 @@ class ConnectRegion():
         V = Visualize()
         V.visualize_1img(simg1)
 
-    def merge_CR_and_CL(self, CR_line_list, CR_interpolate, CR_z_list, correct_CL_index, CL_skel_list, CL_interpolate, CL_z_list, first_skip_skel, combi, line_list):
+    def merge_CR_and_CL(self, CR_line_list, CR_interpolate, CR_z_list, correct_CL_index, CL_skel_list, CL_interpolate, CL_z_list, first_skip_skel, connect_skel_index,  connect_region_index, line_list):
         for index in correct_CL_index:
             CR_line_list.append(CL_skel_list[index])
             CR_interpolate.append(CL_interpolate[index])
@@ -2893,8 +3095,8 @@ class ConnectRegion():
             CR_z_list.append(z_list)
             first_skip_line_index.append(len(CR_line_list)-1)
 
-        depth = img_copy.copy()
-        flat_combi = list(itertools.chain.from_iterable(combi))
+        flat_combi = list(set(itertools.chain.from_iterable(itertools.chain.from_iterable(connect_skel_index))))
+        flat_combi.extend(list(set(itertools.chain.from_iterable(connect_region_index))))
         check1, check2 = [], []
         for i, line in enumerate(line_list):
             if not i in flat_combi:
@@ -2916,6 +3118,8 @@ class GaussLinkingIintegral():
         self.full_length = cfg["full_length"]
         self.error_length = self.full_length//5
         self.len_threshold = self.full_length*2//3
+        if self.len_threshold > 50:
+            self.len_threshold = 50
 
     def calculate_GLI(self, skel_list, z_list, interpolate):
         len_skel = len(skel_list)
@@ -3087,9 +3291,14 @@ class GaussLinkingIintegral():
                 top_5_index.append(not_correct_length_index[index])
                 if len(top_5_index) >= 5:
                     break
+
         top_5_max_GLI_index = []
         for index in sort_value:
             top_5_max_GLI_index.append(np.argmax(GLI[index]))
+
+        # V = Visualize()
+        # for index in top_5_index:
+        #     V.visualize_1region(skel_list[index])
 
         return top_5_index, top_5_max_GLI_index
 
@@ -3098,8 +3307,8 @@ class Graspability():
     def __init__(self):
         self.TEMPLATE_SIZE = 100
         self.OPEN_WIDTH = cfg["OPEN_WIDTH"]
-        self.HAND_THICKNESS_X = 5
-        self.HAND_THICKNESS_Y = 15
+        self.HAND_THICKNESS_X = 10
+        self.HAND_THICKNESS_Y = 25
         self.cutsize = self.TEMPLATE_SIZE/2
         self.interval = 15
 
@@ -3244,7 +3453,7 @@ class Graspability():
             print("Warning: 2943 把持対象物の細線座標に重複があります。")
             print("len(unique) = {}, len(grasp_obj) = {}".format(len(unique), len(grasp_obj)))
 
-        for i in range(self.interval, length - self.interval, self.interval):
+        for i in range(start_index, finish_index - self.interval, self.interval):
             poi = grasp_obj[i]
             if poi in obj_interpolate:
                 continue
@@ -3364,7 +3573,8 @@ class Graspability():
                 # CI_crop_color = gray2color(CI_crop)
                 # CI_crop_color[Hc_rotate > 0] = [255, 0, 0]
                 CI_crop[Hc_rotate == 0] = 0
-                if np.sum(CI_crop) > 0:
+                CI_crop[CI_crop > 0] = 1
+                if np.sum(CI_crop) > 10:
                     collision_per_angle[-1] = i
                     break
                 # V.visualize_1img(CI_crop_color)
@@ -3386,7 +3596,6 @@ class Graspability():
                 C[C>0] = 1
 
                 # print(poi, z)
-                # V = Visualize()
                 # Wc_color = gray2color(np.array(Wc))
                 # Wc_color = cv2.copyMakeBorder(Wc_color, 50, 50, 50, 50, cv2.BORDER_CONSTANT, value=(0, 0, 0))
                 # Wc_color[poi[0]:poi[0]+100, poi[1]:poi[1]+100][np.array(Hc_rotate) > 0] = [255, 0, 0]
@@ -3568,9 +3777,10 @@ def main(input_image, pcd_matrix_index_image, pcd_matrix, MaxDepth):
     ##################################細線化########################################################
     Skel = Skeletonize()
     S = Sort()
-    skel_list, branch_point_list, ad_branch_point_list, end_point_list, skip_region_index, skel2region_index, last_skel_index = Skel.skeletonize_region_list(region_list2)
+    skel_list, branch_point_list, ad_branch_point_list, end_point_list, skip_region_index, skel2region_index, last_region_index = Skel.skeletonize_region_list(region_list2)
     sorted_skel_list = S.sort_skel_list(skel_list, branch_point_list, ad_branch_point_list, end_point_list)
-    first_skip_skel_index, sorted_skel_list, skel2region_index2, first_skip_skel = S.first_check(sorted_skel_list, skel2region_index)
+    sorted_skel_list, skel2region_index, first_skip_skel, first_skip_skel2region_index = S.first_check(sorted_skel_list, skel2region_index)
+    sorted_skel_list, skel2region_index = sunder_curve(sorted_skel_list, skel2region_index)
     SI.save_region(sorted_skel_list, "skeltonized")
     print("Skeletonize is succeeded!")
     ################################################################################################
@@ -3582,7 +3792,22 @@ def main(input_image, pcd_matrix_index_image, pcd_matrix, MaxDepth):
     CL = ConnectLine()
     CL_skel_list, CL_z_list, CL_interpolate, CL_index_list, CL_connect_ep = CL.__main__(sorted_skel_list, end_point_list)
     correct_skel_index, correct_CL_index, connect_skel_index, connect_ep = CL.connect_check(CL_skel_list, CL_index_list, CL_connect_ep)
-    skip_region_index, last_index = CL.which_region_left(skip_region_index, skel2region_index, skel2region_index2, last_skel_index, first_skip_skel_index, correct_skel_index)
+    skip_region_index, last_skel_index = CL.which_region_left(skip_region_index, skel2region_index, first_skip_skel2region_index, last_region_index, first_skip_skel, correct_skel_index)
+    
+    # print(skip_region_index)
+    # print(last_skel_index)
+    # aimg = np.zeros((height, width))
+    # for index in last_skel_index:
+    #     simg = MI.make_image(sorted_skel_list[index], 1)
+    #     aimg += simg
+    # V.visualize_1img(aimg)
+    # rimg = np.zeros((height, width))
+    # for index in skip_region_index:
+    #     print(index)
+    #     rimg += MI.make_image(region_list2[index], 1)
+    # V.visualize_1img(rimg)
+    # input()
+    
     SI.save_region(CL_skel_list, "connected_by_skel")
     print("Connect line process is succeeded!")
     ################################################################################################
@@ -3594,7 +3819,7 @@ def main(input_image, pcd_matrix_index_image, pcd_matrix, MaxDepth):
     CP = CenterPoint()
     center_points_list, cp2region_index = CP.search_center_points(region_list2, skip_region_index)
     CR = ConnectRegion()
-    new_center_points_list, line_list, cp2skel_index = CR.point2line(center_points_list, last_index, sorted_skel_list, cp2region_index, skel2region_index2)
+    new_center_points_list, line_list, cp2skel_index = CR.point2line(center_points_list, last_skel_index, sorted_skel_list, cp2region_index, skel2region_index)
     SI.save_region(line_list, "centerpoint2line")
     thetas, ends, depthes = CR.end_point_information(line_list)
     connect_ep_index, connect_cp_index, line_list, ends, thetas, depthes = CR.match_index(ends, connect_skel_index, connect_ep, cp2skel_index, sorted_skel_list, line_list, thetas, depthes)
@@ -3602,8 +3827,8 @@ def main(input_image, pcd_matrix_index_image, pcd_matrix, MaxDepth):
     # show(combi, side, pos, line_list)
     CR_line_list, CR_interpolate, CR_z_list, CR_index_list = CR.check_connect(combi, side, pos, line_list)
     SI.save_region(CR_line_list, "connected_by_region")
-    SI.save_centerpoints(center_points_list)
-    line_list, interpolate, z_list, first_skip_line_index = CR.merge_CR_and_CL(CR_line_list, CR_interpolate, CR_z_list, correct_CL_index, CL_skel_list, CL_interpolate, CL_z_list, first_skip_skel, combi, line_list) 
+    # SI.save_centerpoints(center_points_list)
+    line_list, interpolate, z_list, first_skip_line_index = CR.merge_CR_and_CL(CR_line_list, CR_interpolate, CR_z_list, correct_CL_index, CL_skel_list, CL_interpolate, CL_z_list, first_skip_skel, connect_cp_index, combi, line_list) 
     SI.save_region(line_list, "connected")
     print("Center point process is succeeded!")
     ################################################################################################
